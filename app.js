@@ -16,6 +16,7 @@ const ACCOUNTS_TO_MONITOR = [
   "@ondeng_012",
   "@zforsure",
   "@userrsiva",
+  "@anakmanisss.02",
 ];
 
 const USERNAME_TELEGRAM = "7319703092";
