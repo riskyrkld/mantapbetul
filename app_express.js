@@ -1,8 +1,21 @@
+const express = require("express");
+const cors = require("cors");
 const axios = require("axios");
 const cheerio = require("cheerio");
 const mongoose = require("mongoose");
 const bot = require("./bot.js");
 require("dotenv").config();
+const fs = require("fs");
+const path = require("path");
+
+// Initialize Express app
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// Middleware
+app.use(cors());
+app.use(express.json());
+
 // MongoDB Connection Caching
 let cached = global.mongoose;
 
@@ -18,6 +31,7 @@ const ACCOUNTS_TO_MONITOR = [
   "@userrsiva",
   "@anakmanisss.02",
   "@hafiza_luthfiana",
+  "@intannataliadewi1",
 ];
 
 const USERNAME_TELEGRAM = "7319703092";
@@ -251,10 +265,13 @@ async function checkLiveStatus(userData, userId) {
   const $ = cheerio.load(userData);
   const scriptContent = $("#SIGI_STATE").html();
   const isLive = /"isLiveBroadcast"\s*:\s*true/.test(userData);
-
+  console.log(`isLiveBroadcast for ${userId}:`, isLive);
   if (!scriptContent && !isLive) {
     console.warn(`No SIGI_STATE and no live broadcast detected for ${userId}`);
   }
+  // Simpan userData ke file HTML
+  const filePath = path.join(process.cwd(), `${userId}.html`);
+  fs.writeFileSync(filePath, userData, "utf-8");
 
   let message = "";
   let shouldNotify = false;
@@ -269,7 +286,7 @@ async function checkLiveStatus(userData, userId) {
   }
 
   const status = sigIState?.LiveRoom?.liveRoomUserInfo?.user?.status;
-
+  console.log(`Status for ${userId}:`, status, "isLive:", isLive);
   if (status === 2) {
     message = `${userId} sedang live!`;
     bot.sendMessage(USERNAME_TELEGRAM, message);
@@ -288,8 +305,9 @@ async function checkLiveStatus(userData, userId) {
     console.log(message);
   }
 
-  return { message, isLive: status === 2 };
+  return { message, isLive: status === 2 || isLive };
 }
+
 // Check all accounts function
 async function checkAllAccounts() {
   const results = {};
@@ -321,67 +339,69 @@ async function checkAllAccounts() {
   return results;
 }
 
-module.exports = async function handler(req, res) {
-  // Enable CORS
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+// Routes
+app.get("/", (req, res) => {
+  res.json({ message: "TikTok Live Monitor API", status: "running" });
+});
 
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
+// Handle /live endpoint - always checks all accounts
+app.get("/live", async (req, res) => {
+  if (isProcessing) {
+    return res
+      .status(429)
+      .json({ message: "Request is already being processed" });
   }
 
-  // Connect to MongoDB
+  isProcessing = true;
+
+  try {
+    // Always check all accounts
+    const results = await checkAllAccounts();
+    return res.status(200).json({ accounts: results });
+  } catch (error) {
+    console.error("Terjadi kesalahan:", error);
+    return res.status(500).json({ message: "Terjadi kesalahan" });
+  } finally {
+    isProcessing = false;
+  }
+});
+
+app.get("/livesessions", async (req, res) => {
+  try {
+    // Allow filtering by username
+    const username = req.query.username;
+    const query = username ? { username } : {};
+
+    const sessions = await LiveSessionModel.find(query).sort({
+      startTime: -1,
+    });
+    return res.json(sessions);
+  } catch (e) {
+    console.error("Error fetching live sessions:", e.message);
+    return res
+      .status(500)
+      .json({ message: "Server error fetching live sessions" });
+  }
+});
+
+// Initialize database connection and start server
+async function startServer() {
   try {
     await connectDB();
+    console.log("Connected to MongoDB");
+
+    app.listen(PORT, () => {
+      console.log(`Server is running on http://localhost:${PORT}`);
+      console.log("Available endpoints:");
+      console.log(`- GET http://localhost:${PORT}/`);
+      console.log(`- GET http://localhost:${PORT}/live`);
+      console.log(`- GET http://localhost:${PORT}/livesessions`);
+    });
   } catch (error) {
-    console.error("Database connection error:", error);
-    return res.status(500).json({ message: "Database connection failed" });
+    console.error("Failed to start server:", error);
+    process.exit(1);
   }
+}
 
-  // Route handling
-  const path = req.url.split("?")[0];
-
-  // Handle /live endpoint - always checks all accounts
-  if (path === "/live" && req.method === "GET") {
-    if (isProcessing) {
-      return res
-        .status(429)
-        .json({ message: "Request is already being processed" });
-    }
-
-    isProcessing = true;
-
-    try {
-      // Always check all accounts
-      const results = await checkAllAccounts();
-      return res.status(200).json({ accounts: results });
-    } catch (error) {
-      console.error("Terjadi kesalahan:", error);
-      return res.status(500).json({ message: "Terjadi kesalahan" });
-    } finally {
-      isProcessing = false;
-    }
-  }
-
-  if (path == "/livesessions" && req.method === "GET") {
-    try {
-      // Allow filtering by username
-      const username = req.query.username;
-      const query = username ? { username } : {};
-
-      const sessions = await LiveSessionModel.find(query).sort({
-        startTime: -1,
-      });
-      return res.json(sessions);
-    } catch (e) {
-      console.error("Error fetching live sessions:", e.message);
-      return res
-        .status(500)
-        .json({ message: "Server error fetching live sessions" });
-    }
-  }
-
-  // Handle unknown routes
-  return res.status(404).json({ message: "Not found" });
-};
+// Start the server
+startServer();
