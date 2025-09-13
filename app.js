@@ -17,6 +17,7 @@ const ACCOUNTS_TO_MONITOR = [
   "@zforsure",
   "@userrsiva",
   "@anakmanisss.02",
+  "@raya4zzhr",
   "@hafiza_luthfiana",
 ];
 
