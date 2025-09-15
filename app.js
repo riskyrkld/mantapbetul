@@ -253,6 +253,27 @@ async function checkLiveStatus(userData, userId) {
   const $ = cheerio.load(userData);
   const scriptContent = $("#SIGI_STATE").html();
   const isLive = /"isLiveBroadcast"\s*:\s*true/.test(userData);
+  const profilePageContent = $("#ProfilePage").html();
+
+  let isWatchCount = false;
+
+  if (profilePageContent) {
+    try {
+      const profileData = JSON.parse(profilePageContent);
+
+      const watch =
+        profileData.mainEntity?.interactionStatistic?.find(
+          (stat) =>
+            stat.interactionType["@type"] === "http://schema.org/WatchAction"
+        )?.userInteractionCount ?? 0;
+
+      isWatchCount = watch > 2;
+    } catch (err) {
+      console.error("Failed to parse ProfilePage JSON:", err);
+    }
+  } else {
+    console.warn(`No ProfilePage script found for ${userId}`);
+  }
 
   if (!scriptContent && !isLive) {
     console.warn(`No SIGI_STATE and no live broadcast detected for ${userId}`);
@@ -272,7 +293,7 @@ async function checkLiveStatus(userData, userId) {
 
   const status = sigIState?.LiveRoom?.liveRoomUserInfo?.user?.status;
 
-  if (status === 2) {
+  if (status === 2 || isWatchCount) {
     message = `${userId} sedang live!`;
     bot.sendMessage(USERNAME_TELEGRAM, message);
     shouldNotify = await updateLiveStatus(userId, true);
