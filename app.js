@@ -267,7 +267,7 @@ async function checkLiveStatus(userData, userId) {
             stat.interactionType["@type"] === "http://schema.org/WatchAction"
         )?.userInteractionCount ?? 0;
 
-      isWatchCount = watch > 2;
+      isWatchCount = watch > 5;
     } catch (err) {
       console.error("Failed to parse ProfilePage JSON:", err);
     }
