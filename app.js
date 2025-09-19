@@ -2,7 +2,9 @@ const axios = require("axios");
 const cheerio = require("cheerio");
 const mongoose = require("mongoose");
 const bot = require("./bot.js");
+const { google } = require("googleapis");
 require("dotenv").config();
+
 // MongoDB Connection Caching
 let cached = global.mongoose;
 
@@ -24,8 +26,125 @@ const ACCOUNTS_TO_MONITOR = [
 
 const USERNAME_TELEGRAM = "7319703092";
 
+// Google Drive configuration
+const GOOGLE_DRIVE_FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID; // Add this to your .env file
+const GOOGLE_SERVICE_ACCOUNT_KEY = process.env.GOOGLE_SERVICE_ACCOUNT_KEY; // Add this to your .env file
+
 if (!cached) {
   cached = global.mongoose = { conn: null, promise: null };
+}
+
+// Google Drive Authentication
+let driveService = null;
+
+async function initializeGoogleDrive() {
+  try {
+    if (!GOOGLE_SERVICE_ACCOUNT_KEY) {
+      console.warn("Google Drive service account key not configured");
+      return null;
+    }
+
+    let credentials;
+
+    // Handle different formats of credentials
+    if (typeof GOOGLE_SERVICE_ACCOUNT_KEY === "string") {
+      try {
+        // Try to parse as JSON string first
+        credentials = JSON.parse(GOOGLE_SERVICE_ACCOUNT_KEY);
+      } catch (parseError) {
+        // If parsing fails, it might be base64 encoded (common in Vercel)
+        try {
+          const decoded = Buffer.from(
+            GOOGLE_SERVICE_ACCOUNT_KEY,
+            "base64"
+          ).toString("utf8");
+          credentials = JSON.parse(decoded);
+        } catch (base64Error) {
+          console.error("Failed to parse service account key:", parseError);
+          return null;
+        }
+      }
+    } else {
+      // Already an object
+      credentials = GOOGLE_SERVICE_ACCOUNT_KEY;
+    }
+
+    // Validate required fields
+    if (!credentials.private_key || !credentials.client_email) {
+      console.error(
+        "Invalid service account credentials: missing required fields"
+      );
+      return null;
+    }
+
+    const auth = new google.auth.GoogleAuth({
+      credentials: credentials,
+      scopes: ["https://www.googleapis.com/auth/drive.file"],
+    });
+
+    driveService = google.drive({ version: "v3", auth });
+    console.log("Google Drive service initialized successfully");
+    return driveService;
+  } catch (error) {
+    console.error("Error initializing Google Drive:", error);
+    return null;
+  }
+}
+
+async function saveHtmlToGoogleDrive(userId, htmlContent, reason) {
+  try {
+    if (!driveService) {
+      driveService = await initializeGoogleDrive();
+    }
+
+    if (!driveService) {
+      console.warn("Google Drive service not available, skipping HTML save");
+      return null;
+    }
+
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const fileName = `${userId.replace("@", "")}_${reason}_${timestamp}.html`;
+
+    // For Vercel, we'll use Buffer instead of temporary files
+    const fileBuffer = Buffer.from(htmlContent, "utf8");
+
+    const fileMetadata = {
+      name: fileName,
+      parents: GOOGLE_DRIVE_FOLDER_ID ? [GOOGLE_DRIVE_FOLDER_ID] : undefined,
+    };
+
+    const media = {
+      mimeType: "text/html",
+      body: require("stream").Readable.from(fileBuffer),
+    };
+
+    const response = await driveService.files.create({
+      resource: fileMetadata,
+      media: media,
+      fields: "id, name, webViewLink",
+    });
+
+    console.log(
+      `HTML saved to Google Drive: ${response.data.name} (ID: ${response.data.id})`
+    );
+
+    // Optionally send notification via Telegram
+    const message = `⚠️ HTML Debug File Saved\nUser: ${userId}\nReason: ${reason}\nFile: ${response.data.name}\nLink: ${response.data.webViewLink}`;
+    try {
+      await bot.sendMessage(USERNAME_TELEGRAM, message);
+    } catch (telegramError) {
+      console.error("Error sending Telegram notification:", telegramError);
+    }
+
+    return {
+      fileId: response.data.id,
+      fileName: response.data.name,
+      webViewLink: response.data.webViewLink,
+    };
+  } catch (error) {
+    console.error("Error saving HTML to Google Drive:", error);
+    return null;
+  }
 }
 
 async function connectDB() {
@@ -56,15 +175,25 @@ const LiveStatusSchema = new mongoose.Schema({
   lastLiveStart: { type: Date },
   lastCheck: { type: Date },
   tempOfflineSince: { type: Date, default: null },
-  isInGracePeriod: { type: Boolean, default: false }, // Flag untuk menandai pengguna dalam masa jeda
+  isInGracePeriod: { type: Boolean, default: false },
 });
 
 const liveSessionSchema = new mongoose.Schema({
   username: { type: String, required: true },
   startTime: { type: Date, required: true },
   endTime: { type: Date },
-  duration: { type: Number }, // dalam menit
-  date: { type: String }, // format: YYYY-MM-DD
+  duration: { type: Number },
+  date: { type: String },
+});
+
+// New schema for tracking HTML debug files
+const HtmlDebugSchema = new mongoose.Schema({
+  userId: { type: String, required: true },
+  reason: { type: String, required: true }, // 'no_sigi_state', 'no_profile_page', 'both_missing'
+  fileName: { type: String, required: true },
+  googleDriveFileId: { type: String },
+  webViewLink: { type: String },
+  timestamp: { type: Date, default: Date.now },
 });
 
 const LiveStatusModel =
@@ -73,6 +202,9 @@ const LiveStatusModel =
 const LiveSessionModel =
   mongoose.models.LiveSession ||
   mongoose.model("LiveSession", liveSessionSchema);
+
+const HtmlDebugModel =
+  mongoose.models.HtmlDebug || mongoose.model("HtmlDebug", HtmlDebugSchema);
 
 // Processing flag
 let isProcessing = false;
@@ -85,21 +217,18 @@ async function updateLiveStatus(userId, isCurrentlyLive) {
     const formattedDate = currentTime.toISOString().split("T")[0];
     let shouldNotify = false;
 
-    // Jika tidak ada status live yang tersimpan sebelumnya
     if (!liveStatus) {
-      // Membuat record LiveStatus baru
       liveStatus = new LiveStatusModel({
         userId,
         isLive: isCurrentlyLive,
         lastLiveStart: isCurrentlyLive ? currentTime : null,
         lastCheck: currentTime,
-        tempOfflineSince: null, // Menambahkan field untuk melacak kapan jeda dimulai
+        tempOfflineSince: null,
         isInGracePeriod: false,
       });
 
       await liveStatus.save();
 
-      // Jika sedang live, buat sesi baru
       if (isCurrentlyLive) {
         await createNewLiveSession(userId, currentTime, formattedDate);
         shouldNotify = true;
@@ -108,10 +237,8 @@ async function updateLiveStatus(userId, isCurrentlyLive) {
       return shouldNotify;
     }
 
-    // Update waktu pemeriksaan terakhir
     liveStatus.lastCheck = currentTime;
 
-    // Kondisi 1: Status berubah dari tidak live menjadi live
     if (isCurrentlyLive && !liveStatus.isLive) {
       if (liveStatus.isInGracePeriod && liveStatus.tempOfflineSince) {
         console.log(
@@ -132,18 +259,13 @@ async function updateLiveStatus(userId, isCurrentlyLive) {
         liveStatus.tempOfflineSince = null;
         await liveStatus.save();
 
-        // Membuat catatan LiveSession baru setiap kali pengguna memulai live
         await createNewLiveSession(userId, currentTime, formattedDate);
         shouldNotify = true;
       }
-    }
-    // Kondisi 2: Masih live (tidak ada perubahan status)
-    else if (isCurrentlyLive && liveStatus.isLive) {
+    } else if (isCurrentlyLive && liveStatus.isLive) {
       await liveStatus.save();
       shouldNotify = false;
-    }
-    // Kondisi 3: Status berubah dari live menjadi tidak live
-    else if (!isCurrentlyLive && liveStatus.isLive) {
+    } else if (!isCurrentlyLive && liveStatus.isLive) {
       liveStatus.isInGracePeriod = true;
       liveStatus.tempOfflineSince = currentTime;
       liveStatus.isLive = false;
@@ -153,30 +275,22 @@ async function updateLiveStatus(userId, isCurrentlyLive) {
         `${userId} terdeteksi offline pada ${currentTime.toISOString()}, masuk masa jeda ${GRACE_PERIOD_MINUTES} menit`
       );
 
-      // Menyelesaikan sesi live yang sedang berlangsung
-      // await completeLiveSession(userId, currentTime);
       shouldNotify = false;
-    }
-    // Kondisi 4: Tetap tidak live
-    else if (!isCurrentlyLive && !liveStatus.isLive) {
-      // Cek apakah pengguna dalam masa jeda dan sudah melewati batas waktu jeda
+    } else if (!isCurrentlyLive && !liveStatus.isLive) {
       if (liveStatus.isInGracePeriod && liveStatus.tempOfflineSince) {
         const minutesSinceOffline =
           (currentTime - liveStatus.tempOfflineSince) / (1000 * 60);
 
         if (minutesSinceOffline > GRACE_PERIOD_MINUTES) {
-          // Grace period habis, sekarang kita selesaikan sesi live
           console.log(
             `${userId} masih offline setelah ${Math.round(
               minutesSinceOffline
             )} menit, menyelesaikan sesi live`
           );
 
-          // Reset flag grace period
           liveStatus.isInGracePeriod = false;
           await liveStatus.save();
 
-          // Menyelesaikan sesi live dengan waktu offline awal sebagai waktu akhir
           await completeLiveSession(userId, liveStatus.tempOfflineSince);
         } else {
           console.log(
@@ -218,19 +332,16 @@ async function createNewLiveSession(username, startTime, formattedDate) {
 
 async function completeLiveSession(username, endTime) {
   try {
-    // Cari sesi live terbaru yang belum memiliki waktu berakhir
     const ongoingSession = await LiveSessionModel.findOne({
       username: username,
       endTime: { $exists: false },
     }).sort({ startTime: -1 });
 
     if (ongoingSession) {
-      // Hitung durasi dalam menit
       const durationMinutes = Math.round(
         (endTime - ongoingSession.startTime) / (1000 * 60)
       );
 
-      // Update sesi dengan waktu berakhir dan durasi
       ongoingSession.endTime = endTime;
       ongoingSession.duration = durationMinutes;
 
@@ -254,6 +365,47 @@ async function checkLiveStatus(userData, userId) {
   const scriptContent = $("#SIGI_STATE").html();
   const isLive = /"isLiveBroadcast"\s*:\s*true/.test(userData);
   const profilePageContent = $("#ProfilePage").html();
+
+  // Check for missing elements and save HTML if needed
+  const missingSigiState = !scriptContent;
+  const missingProfilePage = !profilePageContent;
+
+  if (missingSigiState || missingProfilePage) {
+    let reason;
+    if (missingSigiState && missingProfilePage) {
+      reason = "both_missing";
+    } else if (missingSigiState) {
+      reason = "no_sigi_state";
+    } else {
+      reason = "no_profile_page";
+    }
+
+    console.warn(
+      `⚠️ ${reason
+        .replace("_", " ")
+        .toUpperCase()} detected for ${userId} - saving HTML to Google Drive`
+    );
+
+    // Save HTML to Google Drive
+    const saveResult = await saveHtmlToGoogleDrive(userId, userData, reason);
+
+    if (saveResult) {
+      // Save debug info to database
+      try {
+        const debugRecord = new HtmlDebugModel({
+          userId: userId,
+          reason: reason,
+          fileName: saveResult.fileName,
+          googleDriveFileId: saveResult.fileId,
+          webViewLink: saveResult.webViewLink,
+        });
+        await debugRecord.save();
+        console.log(`Debug record saved to database for ${userId}`);
+      } catch (dbError) {
+        console.error("Error saving debug record to database:", dbError);
+      }
+    }
+  }
 
   let isWatchCount = false;
 
@@ -313,7 +465,7 @@ async function checkLiveStatus(userData, userId) {
 
   return { message, isLive: status === 2 };
 }
-// Check all accounts function
+
 async function checkAllAccounts() {
   const results = {};
 
@@ -362,10 +514,15 @@ module.exports = async function handler(req, res) {
     return res.status(500).json({ message: "Database connection failed" });
   }
 
+  // Initialize Google Drive service if not already done
+  if (!driveService) {
+    await initializeGoogleDrive();
+  }
+
   // Route handling
   const path = req.url.split("?")[0];
 
-  // Handle /live endpoint - always checks all accounts
+  // Handle /live endpoint
   if (path === "/live" && req.method === "GET") {
     if (isProcessing) {
       return res
@@ -376,7 +533,6 @@ module.exports = async function handler(req, res) {
     isProcessing = true;
 
     try {
-      // Always check all accounts
       const results = await checkAllAccounts();
       return res.status(200).json({ accounts: results });
     } catch (error) {
@@ -387,9 +543,9 @@ module.exports = async function handler(req, res) {
     }
   }
 
-  if (path == "/livesessions" && req.method === "GET") {
+  // Handle /livesessions endpoint
+  if (path === "/livesessions" && req.method === "GET") {
     try {
-      // Allow filtering by username
       const username = req.query.username;
       const query = username ? { username } : {};
 
@@ -402,6 +558,24 @@ module.exports = async function handler(req, res) {
       return res
         .status(500)
         .json({ message: "Server error fetching live sessions" });
+    }
+  }
+
+  // Handle /debug-files endpoint - new endpoint to view saved HTML debug files
+  if (path === "/debug-files" && req.method === "GET") {
+    try {
+      const userId = req.query.userId;
+      const query = userId ? { userId } : {};
+
+      const debugFiles = await HtmlDebugModel.find(query).sort({
+        timestamp: -1,
+      });
+      return res.json(debugFiles);
+    } catch (e) {
+      console.error("Error fetching debug files:", e.message);
+      return res
+        .status(500)
+        .json({ message: "Server error fetching debug files" });
     }
   }
 
