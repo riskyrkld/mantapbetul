@@ -2,6 +2,7 @@ const axios = require("axios");
 const cheerio = require("cheerio");
 const mongoose = require("mongoose");
 const { liveBot, debugBot } = require("./bot.js");
+const FormData = require("form-data");
 require("dotenv").config();
 
 // MongoDB Connection Caching
@@ -96,24 +97,35 @@ async function sendHtmlToTelegram(userId, htmlContent, reason) {
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
     const fileName = `${userId.replace("@", "")}_${reason}_${timestamp}.html`;
 
-    // Create buffer from HTML content
+    // Convert HTML content to Buffer
     const fileBuffer = Buffer.from(htmlContent, "utf8");
 
-    // Gunakan debugBot untuk mengirim file HTML (lebih reliable)
-    if (debugBot) {
-      try {
-        const response = await debugBot.sendDocument(
-          USERNAME_TELEGRAM,
-          fileBuffer,
-          {
-            caption: `📄 HTML Debug File\nUser: ${userId}\nReason: ${reason}\nFile: ${fileName}`,
-            filename: fileName,
-          }
-        );
+    // Method 1: Gunakan Telegram Bot API langsung dengan axios (paling reliable di Vercel)
+    try {
+      const formData = new FormData();
+      formData.append("chat_id", USERNAME_TELEGRAM);
+      formData.append(
+        "document",
+        new Blob([fileBuffer], { type: "text/html" }),
+        fileName
+      );
+      formData.append(
+        "caption",
+        `📄 HTML Debug File\nUser: ${userId}\nReason: ${reason}`
+      );
 
-        const telegramFileId = response.document.file_id;
+      const response = await axios.post(
+        `https://api.telegram.org/bot8438488742:AAEGncK5SIineac8494N2SGjINtMHUUVtFU/sendDocument`,
+        formData,
+        {
+          headers: formData.getHeaders(),
+        }
+      );
+
+      if (response.data.ok) {
+        const telegramFileId = response.data.result.document.file_id;
         console.log(
-          `✅ HTML file sent via debugBot: ${fileName} (File ID: ${telegramFileId})`
+          `✅ HTML file sent via Telegram API: ${fileName} (File ID: ${telegramFileId})`
         );
 
         // Save debug info to database
@@ -134,49 +146,56 @@ async function sendHtmlToTelegram(userId, htmlContent, reason) {
           fileName: fileName,
           telegramFileId: telegramFileId,
         };
-      } catch (debugBotError) {
-        console.warn(
-          "debugBot failed, trying liveBot as fallback:",
-          debugBotError.message
-        );
-        // Fallback ke liveBot jika debugBot gagal
-        throw debugBotError;
+      } else {
+        throw new Error(`Telegram API error: ${response.data.description}`);
       }
+    } catch (apiError) {
+      console.warn(
+        "Direct API method failed, trying alternative method:",
+        apiError.message
+      );
+      throw apiError;
     }
-
-    // Fallback: Jika debugBot tidak tersedia atau gagal
-    console.log("Sending via liveBot as fallback...");
-    const truncatedHtml = htmlContent.substring(0, 4000);
-    const message = `📄 HTML Debug File\nUser: ${userId}\nReason: ${reason}\nFile: ${fileName}\n\n\`\`\`html\n${truncatedHtml}${
-      htmlContent.length > 4000 ? "\n...[truncated]" : ""
-    }\n\`\`\``;
-
-    await liveBot.sendMessage(USERNAME_TELEGRAM, message, {
-      parse_mode: "HTML",
-    });
-
-    console.log(
-      `✅ HTML sent to Telegram via liveBot (truncated): ${fileName}`
-    );
-
-    return {
-      fileName: fileName,
-      telegramFileId: null,
-    };
   } catch (error) {
     console.error(
       "Error sending HTML to Telegram:",
       error.response?.data || error.message
     );
 
-    // Fallback: send notification only
+    // Fallback: Send as text message via liveBot
     try {
-      const message = `⚠️ HTML Debug Needed\nUser: ${userId}\nReason: ${reason}\nNote: Could not send HTML file directly`;
-      await debugBot.sendMessage(USERNAME_TELEGRAM, message);
+      const truncatedHtml = htmlContent.substring(0, 3500);
+      const message = `📄 HTML Debug File\nUser: ${userId}\nReason: ${reason}\n\n<pre>${truncatedHtml}${
+        htmlContent.length > 3500 ? "\n...[truncated]" : ""
+      }</pre>`;
+
+      await debugBot.sendMessage(USERNAME_TELEGRAM, message, {
+        parse_mode: "HTML",
+      });
+
+      console.log(
+        `✅ HTML sent as text message via liveBot (truncated) for ${userId}`
+      );
+
+      return {
+        fileName: `${userId.replace("@", "")}_${reason}_${new Date()
+          .toISOString()
+          .replace(/[:.]/g, "-")}.html`,
+        telegramFileId: null,
+      };
     } catch (fallbackError) {
-      console.error("Error sending fallback message:", fallbackError);
+      console.error("Fallback message also failed:", fallbackError.message);
+
+      // Last resort: send notification only
+      try {
+        const message = `⚠️ HTML Debug Failed\nUser: ${userId}\nReason: ${reason}\nNote: Could not send HTML file. Check server logs.`;
+        await debugBot.sendMessage(USERNAME_TELEGRAM, message);
+      } catch (finalError) {
+        console.error("Final fallback also failed:", finalError);
+      }
+
+      return null;
     }
-    return null;
   }
 }
 
