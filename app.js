@@ -37,6 +37,28 @@ if (!cached) {
 // Google Drive Authentication
 let driveService = null;
 
+function parseServiceAccountKey(keyInput) {
+  if (!keyInput) return null;
+
+  try {
+    // If already an object, return as is
+    if (typeof keyInput === "object") {
+      return keyInput;
+    }
+
+    // If it's a string, parse it
+    if (typeof keyInput === "string") {
+      // Replace literal \n dengan actual newlines
+      const processed = keyInput.replace(/\\n/g, "\n");
+      return JSON.parse(processed);
+    }
+  } catch (error) {
+    console.error("Failed to parse service account key:", error.message);
+    return null;
+  }
+}
+
+// Fixed initializeGoogleDrive function
 async function initializeGoogleDrive() {
   try {
     if (!GOOGLE_SERVICE_ACCOUNT_KEY) {
@@ -44,29 +66,12 @@ async function initializeGoogleDrive() {
       return null;
     }
 
-    let credentials;
+    // Parse credentials dengan helper function
+    let credentials = parseServiceAccountKey(GOOGLE_SERVICE_ACCOUNT_KEY);
 
-    // Handle different formats of credentials
-    if (typeof GOOGLE_SERVICE_ACCOUNT_KEY === "string") {
-      try {
-        // Try to parse as JSON string first
-        credentials = JSON.parse(GOOGLE_SERVICE_ACCOUNT_KEY);
-      } catch (parseError) {
-        // If parsing fails, it might be base64 encoded (common in Vercel)
-        try {
-          const decoded = Buffer.from(
-            GOOGLE_SERVICE_ACCOUNT_KEY,
-            "base64"
-          ).toString("utf8");
-          credentials = JSON.parse(decoded);
-        } catch (base64Error) {
-          console.error("Failed to parse service account key:", parseError);
-          return null;
-        }
-      }
-    } else {
-      // Already an object
-      credentials = GOOGLE_SERVICE_ACCOUNT_KEY;
+    if (!credentials) {
+      console.error("Failed to parse service account credentials");
+      return null;
     }
 
     // Validate required fields
@@ -75,6 +80,11 @@ async function initializeGoogleDrive() {
         "Invalid service account credentials: missing required fields"
       );
       return null;
+    }
+
+    // Normalize private_key - pastikan newlines benar
+    if (credentials.private_key.includes("\\n")) {
+      credentials.private_key = credentials.private_key.replace(/\\n/g, "\n");
     }
 
     const auth = new google.auth.GoogleAuth({
@@ -90,7 +100,6 @@ async function initializeGoogleDrive() {
     return null;
   }
 }
-
 async function saveHtmlToGoogleDrive(userId, htmlContent, reason) {
   try {
     if (!driveService) {
