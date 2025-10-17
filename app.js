@@ -37,30 +37,27 @@ if (!cached) {
 // Google Drive Authentication
 let driveService = null;
 
-export function parseServiceAccountKey(keyInput) {
+function parseServiceAccountKey(keyInput) {
   if (!keyInput) return null;
 
   try {
-    // Kalau sudah object langsung kembalikan
-    if (typeof keyInput === "object") {
-      return keyInput;
+    // Deteksi apakah input base64
+    const isBase64 = /^[A-Za-z0-9+/=]+$/.test(keyInput.trim());
+    const decoded = isBase64
+      ? Buffer.from(keyInput, "base64").toString("utf-8")
+      : keyInput;
+
+    const json = JSON.parse(decoded);
+    if (json.private_key?.includes("\\n")) {
+      json.private_key = json.private_key.replace(/\\n/g, "\n");
     }
 
-    // Parse string JSON dulu
-    const parsed = JSON.parse(keyInput);
-
-    // Baru perbaiki newline di private_key
-    if (parsed.private_key) {
-      parsed.private_key = parsed.private_key.replace(/\\n/g, "\n");
-    }
-
-    return parsed;
+    return json;
   } catch (error) {
-    console.error("❌ Failed to parse service account key:", error.message);
+    console.error("Failed to parse service account key:", error.message);
     return null;
   }
 }
-
 // Fixed initializeGoogleDrive function
 async function initializeGoogleDrive() {
   try {
