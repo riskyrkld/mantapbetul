@@ -1,8 +1,7 @@
 const axios = require("axios");
 const cheerio = require("cheerio");
 const mongoose = require("mongoose");
-const bot = require("./bot.js");
-const { google } = require("googleapis");
+const { liveBot, debugBot } = require("./bot.js");
 require("dotenv").config();
 
 // MongoDB Connection Caching
@@ -26,129 +25,8 @@ const ACCOUNTS_TO_MONITOR = [
 
 const USERNAME_TELEGRAM = "7319703092";
 
-// Google Drive configuration
-const GOOGLE_DRIVE_FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID; // Add this to your .env file
-const GOOGLE_SERVICE_ACCOUNT_KEY = process.env.GOOGLE_SERVICE_ACCOUNT_KEY; // Add this to your .env file
-
 if (!cached) {
   cached = global.mongoose = { conn: null, promise: null };
-}
-
-// Google Drive Authentication
-let driveService = null;
-
-function parseServiceAccountKey(keyInput) {
-  if (!keyInput) return null;
-
-  try {
-    // Deteksi apakah input base64
-    const isBase64 = /^[A-Za-z0-9+/=]+$/.test(keyInput.trim());
-    const decoded = isBase64
-      ? Buffer.from(keyInput, "base64").toString("utf-8")
-      : keyInput;
-
-    const json = JSON.parse(decoded);
-    if (json.private_key?.includes("\\n")) {
-      json.private_key = json.private_key.replace(/\\n/g, "\n");
-    }
-
-    return json;
-  } catch (error) {
-    console.error("Failed to parse service account key:", error.message);
-    return null;
-  }
-}
-// Fixed initializeGoogleDrive function
-async function initializeGoogleDrive() {
-  try {
-    if (!GOOGLE_SERVICE_ACCOUNT_KEY) {
-      console.warn("Google Drive service account key not configured");
-      return null;
-    }
-
-    const credentials = parseServiceAccountKey(GOOGLE_SERVICE_ACCOUNT_KEY);
-
-    if (!credentials) {
-      console.error("Failed to parse service account credentials");
-      return null;
-    }
-
-    // Pastikan private_key dan client_email ada
-    if (!credentials.private_key || !credentials.client_email) {
-      console.error(
-        "Invalid service account credentials: missing required fields"
-      );
-      return null;
-    }
-
-    const auth = new google.auth.GoogleAuth({
-      credentials,
-      scopes: ["https://www.googleapis.com/auth/drive.file"],
-    });
-
-    driveService = google.drive({ version: "v3", auth });
-    console.log("✅ Google Drive service initialized successfully");
-    return driveService;
-  } catch (error) {
-    console.error("❌ Error initializing Google Drive:", error);
-    return null;
-  }
-}
-
-async function saveHtmlToGoogleDrive(userId, htmlContent, reason) {
-  try {
-    if (!driveService) {
-      driveService = await initializeGoogleDrive();
-    }
-
-    if (!driveService) {
-      console.warn("Google Drive service not available, skipping HTML save");
-      return null;
-    }
-
-    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const fileName = `${userId.replace("@", "")}_${reason}_${timestamp}.html`;
-
-    // For Vercel, we'll use Buffer instead of temporary files
-    const fileBuffer = Buffer.from(htmlContent, "utf8");
-
-    const fileMetadata = {
-      name: fileName,
-      parents: GOOGLE_DRIVE_FOLDER_ID ? [GOOGLE_DRIVE_FOLDER_ID] : undefined,
-    };
-
-    const media = {
-      mimeType: "text/html",
-      body: require("stream").Readable.from(fileBuffer),
-    };
-
-    const response = await driveService.files.create({
-      resource: fileMetadata,
-      media: media,
-      fields: "id, name, webViewLink",
-    });
-
-    console.log(
-      `HTML saved to Google Drive: ${response.data.name} (ID: ${response.data.id})`
-    );
-
-    // Optionally send notification via Telegram
-    const message = `⚠️ HTML Debug File Saved\nUser: ${userId}\nReason: ${reason}\nFile: ${response.data.name}\nLink: ${response.data.webViewLink}`;
-    try {
-      await bot.sendMessage(USERNAME_TELEGRAM, message);
-    } catch (telegramError) {
-      console.error("Error sending Telegram notification:", telegramError);
-    }
-
-    return {
-      fileId: response.data.id,
-      fileName: response.data.name,
-      webViewLink: response.data.webViewLink,
-    };
-  } catch (error) {
-    console.error("Error saving HTML to Google Drive:", error);
-    return null;
-  }
 }
 
 async function connectDB() {
@@ -190,13 +68,12 @@ const liveSessionSchema = new mongoose.Schema({
   date: { type: String },
 });
 
-// New schema for tracking HTML debug files
+// Schema for tracking HTML debug files
 const HtmlDebugSchema = new mongoose.Schema({
   userId: { type: String, required: true },
   reason: { type: String, required: true }, // 'no_sigi_state', 'no_profile_page', 'both_missing'
   fileName: { type: String, required: true },
-  googleDriveFileId: { type: String },
-  webViewLink: { type: String },
+  telegramFileId: { type: String },
   timestamp: { type: Date, default: Date.now },
 });
 
@@ -214,6 +91,80 @@ const HtmlDebugModel =
 let isProcessing = false;
 
 // Helper Functions
+async function sendHtmlToTelegram(userId, htmlContent, reason) {
+  try {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const fileName = `${userId.replace("@", "")}_${reason}_${timestamp}.html`;
+
+    // Create buffer from HTML content
+    const fileBuffer = Buffer.from(htmlContent, "utf8");
+
+    // Send file to Telegram
+    const response = await axios.post(
+      `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendDocument`,
+      {
+        chat_id: USERNAME_TELEGRAM,
+        document: `data:text/html;base64,${fileBuffer.toString("base64")}`,
+      },
+      {
+        headers: {
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    // Alternative method: Send as text if file is too large
+    if (
+      !response.data.ok &&
+      response.data.description?.includes("Bad Request")
+    ) {
+      console.log("File too large for direct upload, sending as HTML text...");
+      const truncatedHtml = htmlContent.substring(0, 4096);
+      const message = `⚠️ HTML Debug File\nUser: ${userId}\nReason: ${reason}\nFile: ${fileName}\n\n\`\`\`html\n${truncatedHtml}\n...\n\`\`\``;
+      await debugBot.sendMessage(USERNAME_TELEGRAM, message);
+      return null;
+    }
+
+    const telegramFileId = response.data.result?.file_id;
+    console.log(
+      `✅ HTML file sent to Telegram: ${fileName} (File ID: ${telegramFileId})`
+    );
+
+    // Save debug info to database
+    try {
+      const debugRecord = new HtmlDebugModel({
+        userId: userId,
+        reason: reason,
+        fileName: fileName,
+        telegramFileId: telegramFileId,
+      });
+      await debugRecord.save();
+      console.log(`Debug record saved to database for ${userId}`);
+    } catch (dbError) {
+      console.error("Error saving debug record to database:", dbError);
+    }
+
+    return {
+      fileName: fileName,
+      telegramFileId: telegramFileId,
+    };
+  } catch (error) {
+    console.error(
+      "Error sending HTML to Telegram:",
+      error.response?.data || error.message
+    );
+
+    // Fallback: send notification only
+    try {
+      const message = `⚠️ HTML Debug Needed\nUser: ${userId}\nReason: ${reason}\nNote: Could not send HTML file directly`;
+      await debugBot.sendMessage(USERNAME_TELEGRAM, message);
+    } catch (fallbackError) {
+      console.error("Error sending fallback message:", fallbackError);
+    }
+    return null;
+  }
+}
+
 async function updateLiveStatus(userId, isCurrentlyLive) {
   try {
     const currentTime = new Date();
@@ -370,7 +321,7 @@ async function checkLiveStatus(userData, userId) {
   const isLive = /"isLiveBroadcast"\s*:\s*true/.test(userData);
   const profilePageContent = $("#ProfilePage").html();
 
-  // Check for missing elements and save HTML if needed
+  // Check for missing elements and send HTML if needed
   const missingSigiState = !scriptContent;
   const missingProfilePage = !profilePageContent;
 
@@ -386,29 +337,12 @@ async function checkLiveStatus(userData, userId) {
 
     console.warn(
       `⚠️ ${reason
-        .replace("_", " ")
-        .toUpperCase()} detected for ${userId} - saving HTML to Google Drive`
+        .replace(/_/g, " ")
+        .toUpperCase()} detected for ${userId} - sending HTML to Telegram`
     );
 
-    // Save HTML to Google Drive
-    const saveResult = await saveHtmlToGoogleDrive(userId, userData, reason);
-
-    if (saveResult) {
-      // Save debug info to database
-      try {
-        const debugRecord = new HtmlDebugModel({
-          userId: userId,
-          reason: reason,
-          fileName: saveResult.fileName,
-          googleDriveFileId: saveResult.fileId,
-          webViewLink: saveResult.webViewLink,
-        });
-        await debugRecord.save();
-        console.log(`Debug record saved to database for ${userId}`);
-      } catch (dbError) {
-        console.error("Error saving debug record to database:", dbError);
-      }
-    }
+    // Send HTML to Telegram
+    await sendHtmlToTelegram(userId, userData, reason);
   }
 
   let isWatchCount = false;
@@ -451,7 +385,7 @@ async function checkLiveStatus(userData, userId) {
 
   if (status === 2 || isWatchCount) {
     message = `${userId} sedang live!`;
-    bot.sendMessage(USERNAME_TELEGRAM, message);
+    liveBot.sendMessage(USERNAME_TELEGRAM, message);
     shouldNotify = await updateLiveStatus(userId, true);
 
     if (shouldNotify) {
@@ -518,11 +452,6 @@ module.exports = async function handler(req, res) {
     return res.status(500).json({ message: "Database connection failed" });
   }
 
-  // Initialize Google Drive service if not already done
-  if (!driveService) {
-    await initializeGoogleDrive();
-  }
-
   // Route handling
   const path = req.url.split("?")[0];
 
@@ -565,7 +494,7 @@ module.exports = async function handler(req, res) {
     }
   }
 
-  // Handle /debug-files endpoint - new endpoint to view saved HTML debug files
+  // Handle /debug-files endpoint - view saved HTML debug files
   if (path === "/debug-files" && req.method === "GET") {
     try {
       const userId = req.query.userId;
