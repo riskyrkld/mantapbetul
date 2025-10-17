@@ -99,54 +99,69 @@ async function sendHtmlToTelegram(userId, htmlContent, reason) {
     // Create buffer from HTML content
     const fileBuffer = Buffer.from(htmlContent, "utf8");
 
-    // Send file to Telegram
-    const response = await axios.post(
-      `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendDocument`,
-      {
-        chat_id: USERNAME_TELEGRAM,
-        document: `data:text/html;base64,${fileBuffer.toString("base64")}`,
-      },
-      {
-        headers: {
-          "Content-Type": "application/json",
-        },
+    // Gunakan debugBot untuk mengirim file HTML (lebih reliable)
+    if (debugBot) {
+      try {
+        const response = await debugBot.sendDocument(
+          USERNAME_TELEGRAM,
+          fileBuffer,
+          {
+            caption: `📄 HTML Debug File\nUser: ${userId}\nReason: ${reason}\nFile: ${fileName}`,
+            filename: fileName,
+          }
+        );
+
+        const telegramFileId = response.document.file_id;
+        console.log(
+          `✅ HTML file sent via debugBot: ${fileName} (File ID: ${telegramFileId})`
+        );
+
+        // Save debug info to database
+        try {
+          const debugRecord = new HtmlDebugModel({
+            userId: userId,
+            reason: reason,
+            fileName: fileName,
+            telegramFileId: telegramFileId,
+          });
+          await debugRecord.save();
+          console.log(`Debug record saved to database for ${userId}`);
+        } catch (dbError) {
+          console.error("Error saving debug record to database:", dbError);
+        }
+
+        return {
+          fileName: fileName,
+          telegramFileId: telegramFileId,
+        };
+      } catch (debugBotError) {
+        console.warn(
+          "debugBot failed, trying liveBot as fallback:",
+          debugBotError.message
+        );
+        // Fallback ke liveBot jika debugBot gagal
+        throw debugBotError;
       }
-    );
-
-    // Alternative method: Send as text if file is too large
-    if (
-      !response.data.ok &&
-      response.data.description?.includes("Bad Request")
-    ) {
-      console.log("File too large for direct upload, sending as HTML text...");
-      const truncatedHtml = htmlContent.substring(0, 4096);
-      const message = `⚠️ HTML Debug File\nUser: ${userId}\nReason: ${reason}\nFile: ${fileName}\n\n\`\`\`html\n${truncatedHtml}\n...\n\`\`\``;
-      await debugBot.sendMessage(USERNAME_TELEGRAM, message);
-      return null;
     }
 
-    const telegramFileId = response.data.result?.file_id;
+    // Fallback: Jika debugBot tidak tersedia atau gagal
+    console.log("Sending via liveBot as fallback...");
+    const truncatedHtml = htmlContent.substring(0, 4000);
+    const message = `📄 HTML Debug File\nUser: ${userId}\nReason: ${reason}\nFile: ${fileName}\n\n\`\`\`html\n${truncatedHtml}${
+      htmlContent.length > 4000 ? "\n...[truncated]" : ""
+    }\n\`\`\``;
+
+    await liveBot.sendMessage(USERNAME_TELEGRAM, message, {
+      parse_mode: "HTML",
+    });
+
     console.log(
-      `✅ HTML file sent to Telegram: ${fileName} (File ID: ${telegramFileId})`
+      `✅ HTML sent to Telegram via liveBot (truncated): ${fileName}`
     );
-
-    // Save debug info to database
-    try {
-      const debugRecord = new HtmlDebugModel({
-        userId: userId,
-        reason: reason,
-        fileName: fileName,
-        telegramFileId: telegramFileId,
-      });
-      await debugRecord.save();
-      console.log(`Debug record saved to database for ${userId}`);
-    } catch (dbError) {
-      console.error("Error saving debug record to database:", dbError);
-    }
 
     return {
       fileName: fileName,
-      telegramFileId: telegramFileId,
+      telegramFileId: null,
     };
   } catch (error) {
     console.error(
