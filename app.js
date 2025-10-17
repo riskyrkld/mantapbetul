@@ -37,23 +37,26 @@ if (!cached) {
 // Google Drive Authentication
 let driveService = null;
 
-function parseServiceAccountKey(keyInput) {
+export function parseServiceAccountKey(keyInput) {
   if (!keyInput) return null;
 
   try {
-    // If already an object, return as is
+    // Kalau sudah object langsung kembalikan
     if (typeof keyInput === "object") {
       return keyInput;
     }
 
-    // If it's a string, parse it
-    if (typeof keyInput === "string") {
-      // Replace literal \n dengan actual newlines
-      const processed = keyInput.replace(/\\n/g, "\n");
-      return JSON.parse(processed);
+    // Parse string JSON dulu
+    const parsed = JSON.parse(keyInput);
+
+    // Baru perbaiki newline di private_key
+    if (parsed.private_key) {
+      parsed.private_key = parsed.private_key.replace(/\\n/g, "\n");
     }
+
+    return parsed;
   } catch (error) {
-    console.error("Failed to parse service account key:", error.message);
+    console.error("❌ Failed to parse service account key:", error.message);
     return null;
   }
 }
@@ -66,15 +69,15 @@ async function initializeGoogleDrive() {
       return null;
     }
 
-    // Parse credentials dengan helper function
-    let credentials = parseServiceAccountKey(GOOGLE_SERVICE_ACCOUNT_KEY);
+    // Gunakan helper parseServiceAccountKey
+    const credentials = parseServiceAccountKey(GOOGLE_SERVICE_ACCOUNT_KEY);
 
     if (!credentials) {
       console.error("Failed to parse service account credentials");
       return null;
     }
 
-    // Validate required fields
+    // Pastikan private_key dan client_email ada
     if (!credentials.private_key || !credentials.client_email) {
       console.error(
         "Invalid service account credentials: missing required fields"
@@ -82,24 +85,20 @@ async function initializeGoogleDrive() {
       return null;
     }
 
-    // Normalize private_key - pastikan newlines benar
-    if (credentials.private_key.includes("\\n")) {
-      credentials.private_key = credentials.private_key.replace(/\\n/g, "\n");
-    }
-
     const auth = new google.auth.GoogleAuth({
-      credentials: credentials,
+      credentials,
       scopes: ["https://www.googleapis.com/auth/drive.file"],
     });
 
     driveService = google.drive({ version: "v3", auth });
-    console.log("Google Drive service initialized successfully");
+    console.log("✅ Google Drive service initialized successfully");
     return driveService;
   } catch (error) {
-    console.error("Error initializing Google Drive:", error);
+    console.error("❌ Error initializing Google Drive:", error);
     return null;
   }
 }
+
 async function saveHtmlToGoogleDrive(userId, htmlContent, reason) {
   try {
     if (!driveService) {
