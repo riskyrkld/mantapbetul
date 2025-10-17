@@ -66,7 +66,6 @@ async function initializeGoogleDrive() {
       return null;
     }
 
-    // Gunakan helper parseServiceAccountKey
     const credentials = parseServiceAccountKey(GOOGLE_SERVICE_ACCOUNT_KEY);
 
     if (!credentials) {
